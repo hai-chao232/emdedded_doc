@@ -1,0 +1,19 @@
+# 设备本地文件，不进仓库
+.obsidian/
+.trash/
+.vscode/
+
+# 课程练习产生的构建产物与缓存
+.build/
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+compile_commands.json
+Testing/
+*.o
+*.obj
+*.a
+*.lib
+*.exe
