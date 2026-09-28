@@ -39,10 +39,50 @@ tags: [MOC, cortex-m, startup, interrupt]
         ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/14_Weak Handler 为什么能被覆盖]]
         ↓
+[[10_基础知识体系/03_Cortex-M与启动中断/15_Thumb状态与函数地址最低位]]
+        ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/16_从上电到 main 的完整动态图]]
         ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/17_一次外部中断发生时的完整流程]]
 ```
+
+### 启动链的四个补充节点
+
+```text
+15 Thumb 状态与函数地址最低位
+   → 解释 vector[1] 为什么比 symbol 大 1
+
+18 读 Startup 所需的最小 Thumb 汇编
+   → ldr / str / cmp / b / bl，够读懂 Reset_Handler
+
+19 C 与汇编如何互相调用（AAPCS 最小理解）
+   → 为什么汇编可以 bl 一个 C 函数
+
+20 Reset_Handler 反汇编逐条对照
+   → 真实机器码逐条读，需要先构建一次
+```
+
+顺序建议：
+
+```text
+05_Reset 到底发生了什么
+      ↓
+15_Thumb 状态
+
+07_Reset_Handler 逐段看（骨架：为什么有这几步）
+      ↓
+18_最小 Thumb 汇编（工具）
+      ↓
+19_AAPCS（bl 为什么能调 C 函数）
+      ↓
+20_反汇编逐条对照（真实机器码，需要构建产物）
+```
+
+> [!important] 20 必须配合构建产物读
+> [[10_基础知识体系/03_Cortex-M与启动中断/20_Reset_Handler 反汇编逐条对照]] 里的地址、常量池、寄存器值
+> 全部来自 `embedded_lab` 的一次真实构建。
+> 没有构建产物就验证不了，读完也只是又背了一遍结论。
+> 构建命令在 [[01_P0_仓库与构建基线/03_CMake 与交叉编译]]。
 
 ---
 
@@ -63,7 +103,7 @@ Reset 时取 initial MSP / Reset vector
 SystemInit
 .data copy
 .bss clear
-runtime init
+runtime init（__libc_init_array 遍历 .init_array）
 main
 ```
 
@@ -83,5 +123,7 @@ main
 
 - [[01_P0_仓库与构建基线/05_Linker Script 与内存布局]]
 - [[01_P0_仓库与构建基线/06_Startup 与 Reset_Handler]]
+- [[01_P0_仓库与构建基线/07_最小 Executable 与 ELF 体检]]
 - [[01_P0_仓库与构建基线/08_P0 完整启动链]]
 - [[01_P0_仓库与构建基线/09_动手追踪一次启动]]
+- [[01_P0_仓库与构建基线/10_P0启动链毕业检查表]]

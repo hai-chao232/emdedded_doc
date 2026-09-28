@@ -1,212 +1,216 @@
 ---
-tags: [P0, linker, memory, sections]
+tags: [P0, linker, linker-script, memory-layout]
 stage: P0
 ---
 
 # 05｜Linker Script 与内存布局
 
-> [!important] 这一课不要硬啃
-> 如果 Linker Script 看起来像“每一行都认识、合起来完全不懂”，按这个顺序补：
+> [!tip] 深挖入口
+> - [[10_基础知识体系/02_构建与链接/07_Section 到底是什么]]
+> - [[10_基础知识体系/02_构建与链接/06_Symbol 符号到底是什么]]
+> - [[10_基础知识体系/02_构建与链接/13_Location Counter 点号是什么]]
+> - [[10_基础知识体系/02_构建与链接/15_VMA LMA 与 data 初始化镜像]]
+> - [[10_基础知识体系/02_构建与链接/19_ELF Section 与 Segment 的区别]]
+> - [[10_基础知识体系/02_构建与链接/20_NOBITS NOLOAD 与为什么RAM占用不等于Flash占用]]
+> - [[10_基础知识体系/02_构建与链接/21_Alignment Padding 与地址为什么会出现空洞]]
+> - [[10_基础知识体系/01_计算机与MCU基础/04_地址 地址空间 与内存映射]]
+> - [[10_基础知识体系/01_计算机与MCU基础/06_Flash SRAM ROM RAM]]
+> - [[10_基础知识体系/03_Cortex-M与启动中断/02_SP MSP PSP 是什么]]
+
+> [!abstract] 本页目标
+> 本页只负责串起“链接器如何把若干 `.o` 组织成一个可运行镜像”。
+> 遇到局部概念时，优先跳转到基础知识页，不在本页无限展开。
 >
-> 1. [[10_基础知识体系/01_计算机与MCU基础/04_地址 地址空间 与内存映射]]
-> 2. [[10_基础知识体系/02_构建与链接/05_Object File 目标文件是什么]]
-> 3. [[10_基础知识体系/02_构建与链接/07_Section 到底是什么]]
-> 4. [[10_基础知识体系/02_构建与链接/06_Symbol 符号到底是什么]]
-> 5. [[10_基础知识体系/02_构建与链接/09_Linker 到底做了什么]]
-> 6. [[10_基础知识体系/02_构建与链接/10_Linker Script 为什么存在]]
-> 7. [[10_基础知识体系/02_构建与链接/13_Location Counter 点号是什么]]
-> 8. [[10_基础知识体系/02_构建与链接/15_VMA LMA 与 data 初始化镜像]]
->
-> 图解：[[10_基础知识体系/05_图解总览/02_Flash 与 SRAM 程序布局逐层图]]
+> **本页用的是教学简化脚本。** 你工程里实际在用的那份（STM32CubeIDE 生成、15+ 个段）见
+> [[10_基础知识体系/02_构建与链接/23_真实链接脚本逐段注解]]。
+> 两页对照着看，才知道哪些结构是本质、哪些是厂商生成的样板。
 
-> [!abstract] 本节目标
-> 理解编译器得到 `.o` 后，链接器怎样回答：**代码、常量、变量、向量表最终放到 MCU 的什么地址？**
+## 1. 这节课解决什么问题？
 
-## 1. 为什么编译完还不够？
+编译器把每个 `.c` 变成 `.o` 以后，仍然没有一个完整的 MCU 程序。此时还需要回答：
 
-多个目标文件分别带有自己的 `.text/.data/.bss`，但此时还有问题没解决：
+- 哪些代码放进 Flash？
+- 哪些变量最终在 RAM？
+- 向量表为什么必须在启动地址附近？
+- `.data` 为什么同时与 Flash、RAM 都有关？
+- `.bss` 为什么占 RAM 却几乎不需要在 Flash 中保存一串零？
+- `_estack/_sidata/_sdata/_edata/_sbss/_ebss` 是谁产生的？
 
-```text
-main 最终在哪？
-Reset_Handler 最终在哪？
-向量表放哪？
-多个 .text 怎样合并？
-变量运行时放 RAM 哪里？
-.data 的初始值保存在 Flash 哪里？
-```
+这些由**链接阶段**统一解决。
 
-这些主要由 Linker + Linker Script 解决。
-
-## 2. `.o` 是可重定位目标文件
-
-`.o` 已经包含机器码、数据、section、symbol、relocation 信息，但很多引用和地址仍待最终链接。
+## 2. 从 `.o` 到最终 ELF
 
 ```text
-main.o
-system.o
-startup.o
-   ↓ linker
-firmware.elf
+main.c ──编译──> main.o ─┐
+startup.s ─────> startup.o├─ Linker + Linker Script ─> ELF
+system.c ──────> system.o ┤
+其他库对象 ───────────────┘
 ```
 
-## 3. 当前主内存事实
+每个 `.o` 内部已有自己的输入 section，例如：
 
 ```text
-Flash：0x0800_0000，512 KiB
-SRAM ：0x2000_0000，128 KiB
+.text
+.rodata
+.data
+.bss
+.isr_vector
 ```
 
-128 KiB = `0x20000`，所以 SRAM 顶部边界：
+链接器把多个输入 section 归并、排序、分配地址，形成最终输出 section。
 
-```text
-0x20000000 + 0x20000 = 0x20020000
-```
+## 3. MEMORY 回答“物理区域在哪里”
 
-这也是当前 `_estack` 的合理值。
-
-## 4. `MEMORY`：本固件允许使用哪些区域？
-
-典型：
+典型裸机脚本会先描述可用地址区域：
 
 ```ld
 MEMORY
 {
-  RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 128K
-  ROM (rx)  : ORIGIN = 0x08000000, LENGTH = 512K
+    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 512K
+    RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 128K
 }
 ```
 
-它不是“创建物理内存”，而是把当前固件允许使用的地址范围告诉 linker。
+这不是在“创建 Flash/RAM”。
 
-## 5. `SECTIONS`：各种内容分别放哪里？
+它只是告诉链接器：
 
-概念图：
+> 当前目标芯片允许你把哪些内容安排在哪些地址范围内。
 
-```text
-Flash
-├── .isr_vector
-├── .text
-├── .rodata
-└── .data initial image
+真实地址范围来自芯片 Datasheet / Reference Manual / Cortex-M 内存映射。
 
-RAM
-├── .data runtime copy
-├── .bss
-├── heap / other reserves
-└── stack
-```
+深入：
+- [[10_基础知识体系/01_计算机与MCU基础/04_地址 地址空间 与内存映射]]
+- [[10_基础知识体系/01_计算机与MCU基础/06_Flash SRAM ROM RAM]]
+- [[10_基础知识体系/02_构建与链接/11_MEMORY 命令到底在描述什么]]
 
-速查：[[90_知识卡片/RAM Flash 与常见 Section]]。
+## 4. SECTIONS 回答“各类内容放哪里”
 
-## 6. Input Section 和 Output Section
-
-每个 `.o` 都可能有：
-
-```text
-main.o .text
-startup.o .text
-system.o .text
-```
-
-Linker Script 可收集为最终 ELF 的 output `.text`：
+示意：
 
 ```ld
-.text :
+SECTIONS
 {
-    *(.text)
-    *(.text*)
-} >ROM
+    .isr_vector :
+    {
+        KEEP(*(.isr_vector))
+    } > FLASH
+
+    .text :
+    {
+        *(.text*)
+        *(.rodata*)
+    } > FLASH
+
+    .data :
+    {
+        _sdata = .;
+        *(.data*)
+        _edata = .;
+    } > RAM AT> FLASH
+
+    .bss (NOLOAD) :
+    {
+        _sbss = .;
+        *(.bss*)
+        *(COMMON)
+        _ebss = .;
+    } > RAM
+}
 ```
 
-所以“`.text`”这个名字既可能指 input section，也可能指最终 output section，语境要分清。
+核心不是语法，而是回答：
 
-## 7. `.`：Location Counter
+```text
+.isr_vector → Flash
+.text       → Flash
+.rodata     → Flash
+.data       → 运行时在 RAM；初始值镜像在 Flash
+.bss        → 运行时在 RAM；启动时清零
+```
+
+深入：
+- [[10_基础知识体系/02_构建与链接/12_SECTIONS 命令怎样拼装最终镜像]]
+
+## 5. Location Counter `.` 是什么
+
+链接脚本中的 `.` 可以粗略理解为：
+
+> 当前正在安排的输出地址位置。
 
 例如：
 
 ```ld
-.data :
-{
-    _sdata = .;
-    *(.data*)
-    _edata = .;
-} >RAM
+_sdata = .;
 ```
 
-`.` 表示 linker 当前放置位置。
+不是分配一个 C 变量。
 
-因此 `_sdata`、`_edata` 是由 linker 在不同位置建立的 symbol 值。
+而是：
 
-## 8. Linker Symbol 不是普通 C 变量
+> 定义一个名为 `_sdata` 的 linker symbol，其值等于当前位置。
 
-例如：
-
-```ld
-_estack = ORIGIN(RAM) + LENGTH(RAM);
-```
-
-得到：
+因此：
 
 ```text
-_estack = 0x20020000
+_sdata
 ```
 
-它表示 ELF symbol 数值，不是“0x20020000 这个地址里存了一个变量 `_estack`”。
+本质上先是“一个数值/地址符号”，不是“RAM 中又额外占了 4 字节”。
 
-## 9. 为什么 `_estack` 取 RAM 顶部？
+深入：
+- [[10_基础知识体系/02_构建与链接/13_Location Counter 点号是什么]]
 
-Cortex-M 栈通常向低地址增长，初始 SP 设为 SRAM 顶部边界很自然。
+## 6. `.data` 为什么最容易混乱
 
-注意：
-
-```text
-0x20020000 = 顶部边界
-0x2001FFFF = 最后一个有效 byte 地址
-```
-
-两者不矛盾。
-
-## 10. `.data` 为什么有两个地址？
-
-例如：
+假设：
 
 ```c
 uint32_t counter = 10;
 ```
 
-运行时它必须可写，所以在 RAM；但 `10` 要随固件掉电保存，所以初始镜像在 Flash。
+程序烧录前，初始值 `10` 必须有地方永久保存，否则掉电就消失。
 
-典型：
-
-```text
-LMA = Flash
-VMA = RAM
-```
-
-Linker Script：
-
-```ld
-.data :
-{
-    _sdata = .;
-    *(.data*)
-    _edata = .;
-} >RAM AT>ROM
-
-_sidata = LOADADDR(.data);
-```
-
-形成：
+因此：
 
 ```text
-_sidata → Flash source
-_sdata  → RAM destination start
-_edata  → RAM destination end
+Flash
+┌─────────────────────────────┐
+│ .data 初始化镜像：counter=10 │
+└─────────────────────────────┘
+             │ Reset_Handler copy
+             ▼
+RAM
+┌─────────────────────────────┐
+│ counter 的运行实体 = 10      │
+└─────────────────────────────┘
 ```
 
-Startup 负责真正复制。
+这就是：
 
-## 11. `.bss` 为什么不保存整片 0？
+- **LMA**（Load Memory Address）：初始化镜像加载位置，通常在 Flash。
+- **VMA**（Virtual Memory Address）：程序运行时访问它的位置，通常在 RAM。
+
+> [!warning] 关键不是背缩写，而是分清“存在哪”和“运行在哪”
+> 同一个 `counter` 同时出现在两个地址区间：Flash 里是**初始值的一份拷贝**，RAM 里才是**程序运行时真正读写的那份**。
+> 两个地址都对，问“counter 到底在哪”时必须先问“你问的是哪一个”。
+
+深入：
+- [[10_基础知识体系/02_构建与链接/15_VMA LMA 与 data 初始化镜像]]
+
+常见 linker symbols：
+
+```text
+_sidata → Flash 中 .data 初始化镜像起始地址
+_sdata  → RAM 中 .data 运行区起始地址
+_edata  → RAM 中 .data 运行区结束地址
+```
+
+它们共同给 Reset_Handler 一个搬运范围：`[_sidata, ...)` → `[_sdata, _edata)`。
+
+注意 `_sidata` 只标出**起点**：源区长度由 `_edata - _sdata` 决定，而不是由另一个 `_eidata` 标出。
+
+## 7. `.bss` 为什么不同
 
 例如：
 
@@ -214,105 +218,170 @@ Startup 负责真正复制。
 uint32_t flag;
 ```
 
-C 语言要求进入程序时它为 0，但没有必要在 Flash 保存大量零字节。Linker 只在 RAM 预留空间，Startup 对 `[_sbss, _ebss)` 清零。
+C 语言要求具有静态存储期、未显式初始化的对象初值为 0。
 
-## 12. 当前真实输出揭示了一个重要细节
-
-之前：
+最浪费的做法是：
 
 ```text
-_sbss = 0x20000000
-_ebss = 0x2000001c
+Flash 里真的存几千个 0
 ```
 
-所以这个 `.bss` 区间只有：
+更合理的做法：
 
 ```text
-0x1c = 28 B
+ELF 只描述：
+“这段 RAM 运行时需要 N 字节，并且启动时清零”
 ```
 
-但 `arm-none-eabi-size` 却显示：
+因此 `.bss` 常表现为 `SHT_NOBITS`，或者在 linker script 中以 `NOLOAD` 形式描述。
+
+深入：
+- [[10_基础知识体系/02_构建与链接/20_NOBITS NOLOAD 与为什么RAM占用不等于Flash占用]]
+
+常见符号：
 
 ```text
-bss = 1568
+_sbss → RAM .bss 起始
+_ebss → RAM .bss 结束
 ```
 
-这不矛盾。`size` 的 bss 汇总可以包含其他 NOBITS / RAM 占用 section，例如 linker script 预留的 heap/stack 区域。
+Reset_Handler 遍历 `[_sbss, _ebss)` 清零。
 
-所以不能简单认为：
+## 8. `_estack` 为什么常等于 RAM 顶端
+
+示意：
+
+```ld
+_estack = ORIGIN(RAM) + LENGTH(RAM);
+```
+
+当前工程 RAM 区域是：
 
 ```text
-size.bss == _ebss - _sbss
+0x20000000 ~ 0x2001FFFF
 ```
 
-应继续看：
+那么“第一个越过 RAM 的地址”是：
 
-```bash
-arm-none-eabi-objdump -h firmware.elf
+```text
+0x20000000 + 0x20000 = 0x20020000
 ```
 
-这个真实例子说明：**工具输出必须结合 Linker Script 和 section table 解释。**
+栈向低地址增长时，可以把初始 MSP 设置到这里。
 
-## 13. `KEEP()` 为什么常用于向量表？
+> [!note] 边界地址不等于属于这块 RAM 的字节
+> `0x20020000` 是“刚好越过末端”的地址。把它作为初始 MSP 是合法的，因为栈是**先减后写**：第一次压栈才访问 `0x2001FFFC`，仍在 RAM 内。
 
-启用 `--gc-sections` 后，linker 会丢弃看似未引用的 section。但向量表由硬件直接读取，不一定有普通软件引用，所以常见：
+深入：
+- [[10_基础知识体系/03_Cortex-M与启动中断/02_SP MSP PSP 是什么]]
+
+## 9. `ALIGN()` 与 padding
+
+链接器不能总把下一个对象紧贴上一个对象。
+
+如果一个 section 或对象要求 4/8/16 字节对齐，中间可能出现 padding：
+
+```text
+对象 A 结束
+    ↓
+[padding]
+    ↓
+对象 B 的合法对齐地址
+```
+
+因此看到地址“跳了几个字节”不一定是丢失空间。
+
+```ld
+. = ALIGN(4);
+```
+
+可以读成：把当前位置向上推进到下一个 4 字节对齐的地址。
+
+深入：
+- [[10_基础知识体系/02_构建与链接/21_Alignment Padding 与地址为什么会出现空洞]]
+
+## 10. `KEEP()` 为什么常用于向量表
+
+启用：
+
+```text
+-ffunction-sections
+-fdata-sections
+-Wl,--gc-sections
+```
+
+后，链接器可能回收看似“没有普通代码引用”的 section。
+
+向量表恰恰经常是由硬件读取，而不是通过普通 C 调用关系引用。
+
+因此：
 
 ```ld
 KEEP(*(.isr_vector))
 ```
 
-防止它被垃圾回收。
+是在告诉 linker：
 
-## 14. `ENTRY(Reset_Handler)` 不能替代向量表
+> 即使普通引用分析看不到它，也不能丢掉。
 
-ELF 的入口信息和 Cortex-M 真实复位机制不是一回事。
+深入：
+- [[10_基础知识体系/02_构建与链接/16_KEEP gc-sections 与为什么向量表不能被删]]
 
-真实复位：
+## 11. Linker Script 与 Startup 的接口
 
-```text
-vector[0] → MSP
-vector[1] → Reset_Handler
-```
-
-所以正确的向量表位置和内容仍然是关键。见 [[06_Startup 与 Reset_Handler]]。
-
-## 15. 链接成功能证明什么？
-
-能证明：
+Linker Script 负责“给出地址与边界”：
 
 ```text
-symbol 可解析
-section 可按脚本放置
-没有明显 region overflow
-生成了 ELF
+_estack
+_sidata
+_sdata
+_edata
+_sbss
+_ebss
 ```
 
-不能证明：
+Startup / Reset_Handler 负责“在运行时使用这些地址”：
 
 ```text
-真实 MCU 型号一定匹配
-向量表一定能被 CPU 正确读取
-startup 已经成功执行
-运行时 stack 一定安全
-板子已经跑起来
+_sidata → _sdata ... _edata
+_sbss   → 清零 ... _ebss
 ```
 
-## 16. 常见链接错误
+它们不是两个互不相干的文件，而是一对**生产者 / 消费者**。
 
-- `region ... overflowed`：某内存区域放不下。
-- `undefined reference`：symbol 没实现或没链接进来。
-- `multiple definition`：同名强定义冲突。
-- 更隐蔽的错误：脚本语法正确，但描述的是错误 MCU。
+这也是为什么真正理解启动链时，05 与 06 必须来回对照。
 
-## 17. 离开本页前
+## 12. 静态验证
 
-1. `.o` 为什么还不是最终固件？
-2. `MEMORY` 与 `SECTIONS` 分别解决什么？
-3. input / output section 有什么区别？
-4. linker symbol 为什么不是 C 变量？
-5. `.data` 为什么有 VMA/LMA？
-6. `.bss` 为什么不需要在 Flash 保存一份全 0？
-7. 为什么 `size.bss` 不一定等于 `_ebss - _sbss`？
-8. `KEEP(.isr_vector)` 为什么重要？
+推荐至少交叉看：
 
-下一步：[[06_Startup 与 Reset_Handler]]。
+```bash
+arm-none-eabi-size xxx.elf
+arm-none-eabi-objdump -h xxx.elf
+arm-none-eabi-nm -n xxx.elf
+arm-none-eabi-readelf -h -S -l -s xxx.elf
+```
+
+分别回答：
+
+```text
+size     → 大致 ROM/RAM 规模
+objdump  → section 地址、大小
+nm       → symbol 值与类型
+readelf  → ELF / section / program header / symbol 的结构化事实
+```
+
+## 13. 离开本页前
+
+闭卷回答：
+
+1. `.data` 为什么同时关联 Flash 和 RAM？
+2. `.bss` 为什么占 RAM，却不需要在 Flash 中保存同等大小的零？
+3. `_sidata/_sdata/_edata` 是“变量”还是“地址符号”？
+4. `_estack` 为什么常等于 RAM 顶端边界？为什么这样设置是安全的？
+5. `MEMORY` 与 `SECTIONS` 分别解决什么问题？
+6. `KEEP(.isr_vector)` 为什么有意义？
+7. VMA 和 LMA 分别回答什么问题？
+8. 看到两个 symbol 地址之间有空洞，先怀疑什么？
+
+下一步：[[01_P0_仓库与构建基线/06_Startup 与 Reset_Handler]]

@@ -1,277 +1,345 @@
 ---
-tags: [P0, startup, reset-handler, cortex-m]
+tags: [P0, startup, reset-handler, vector-table, cortex-m]
 stage: P0
 ---
 
 # 06｜Startup 与 Reset_Handler
 
-> [!important] 这一课的底层入口
-> 你不需要在本页把所有词一次吃透。任何一个卡住就点进去：
->
+> [!tip] 深挖入口
+> - [[10_基础知识体系/01_计算机与MCU基础/03_CPU 寄存器 指令 与执行]]
+> - [[10_基础知识体系/01_计算机与MCU基础/13_函数地址与代码地址到底是什么]]
 > - [[10_基础知识体系/03_Cortex-M与启动中断/04_向量表 Vector Table]]
 > - [[10_基础知识体系/03_Cortex-M与启动中断/05_Cortex-M Reset 到底发生了什么]]
-> - [[10_基础知识体系/03_Cortex-M与启动中断/02_SP MSP PSP 是什么]]
 > - [[10_基础知识体系/03_Cortex-M与启动中断/06_Startup 文件到底是什么]]
 > - [[10_基础知识体系/03_Cortex-M与启动中断/07_Reset_Handler 逐段看]]
 > - [[10_基础知识体系/03_Cortex-M与启动中断/08_data copy 与 bss clear 为什么由 Startup 做]]
-> - [[10_基础知识体系/03_Cortex-M与启动中断/09_SystemInit 到底处在什么位置]]
->
-> 总图：[[10_基础知识体系/05_图解总览/06_从上电到 main 时间线]]
+> - [[10_基础知识体系/03_Cortex-M与启动中断/15_Thumb状态与函数地址最低位]]
+> - [[10_基础知识体系/03_Cortex-M与启动中断/18_读Startup所需的最小Thumb汇编]]
+> - [[10_基础知识体系/03_Cortex-M与启动中断/19_C与汇编如何互相调用_AAPCS最小理解]]
+> - [[10_基础知识体系/02_构建与链接/15_VMA LMA 与 data 初始化镜像]]
+> - [[10_基础知识体系/02_构建与链接/20_NOBITS NOLOAD 与为什么RAM占用不等于Flash占用]]
+> - [[10_基础知识体系/04_验证与调试/09_怎样验证 Reset_Handler 到 main]]
 
 > [!abstract] 本节目标
-> 回答：**MCU 刚复位、还没有进入 `main()` 时，CPU 怎样一步一步建立 C 程序需要的运行环境？**
+> 本页回答“链接完成后，CPU 如何从复位状态一路运行到 C 代码”。
+> 局部机制请跳到基础知识页。
 
-## 1. 最重要的纠正：Reset_Handler 不是第一件事
+## 1. 最重要的纠正：CPU 不认识 `main`
 
-Cortex-M 复位时，硬件先从向量表读取：
+`main()` 是 C/C++ 运行环境里的约定入口，不是 Cortex-M 硬件规则。
+
+Cortex-M 在复位时只做硬件规定的动作，其中最关键的是读取向量表。
+
+深入：
+- [[10_基础知识体系/01_计算机与MCU基础/03_CPU 寄存器 指令 与执行]]
+- [[10_基础知识体系/01_计算机与MCU基础/13_函数地址与代码地址到底是什么]]
+- [[10_基础知识体系/03_Cortex-M与启动中断/05_Cortex-M Reset 到底发生了什么]]
+
+## 2. 向量表不是抽象概念，而是一串机器可读取的数据
+
+逻辑上可以画成：
 
 ```text
-vector[0] → initial MSP
-vector[1] → Reset vector / Reset_Handler
-```
-
-所以：**CPU 在进入 `Reset_Handler` 前已经获得初始 MSP。**
-
-Startup 中即使再次出现 `ldr sp, =_estack`，也是显式重装 SP，不能理解为此前完全没有栈。
-
-## 2. 向量表先怎么理解？
-
-概念：
-
-```text
-0x08000000  initial MSP
-0x08000004  Reset_Handler
-0x08000008  NMI_Handler
-0x0800000C  HardFault_Handler
+vector[0]  初始 MSP
+vector[1]  Reset_Handler
+vector[2]  NMI_Handler
+vector[3]  HardFault_Handler
 ...
 ```
 
-第 0 项不是函数地址，而是初始 MSP；第 1 项才是复位入口。
+实际 Flash 中只是连续的 32 位数值。
 
-## 3. Startup 提供什么？
-
-当前 ST startup 通常包含：
+谁负责什么（与 [[10_基础知识体系/03_Cortex-M与启动中断/04_向量表 Vector Table]] 的五“谁”一致）：
 
 ```text
-Vector Table
-Reset_Handler
-默认异常/中断 Handler
-weak symbol
-进入 C runtime 前的低级初始化
+Startup 源码       → 定义表项内容与 Handler 名字
+Assembler + Linker → 把名字解析成最终数值
+Linker Script      → 安排最终地址并保留（KEEP）
+烧录工具           → 把最终镜像写进 Flash
+Cortex-M 硬件      → 复位/异常时读取向量表
 ```
 
-它不是普通工具库，而是“CPU 如何进入你的 C 程序”的核心契约。
+深入：
+- [[10_基础知识体系/03_Cortex-M与启动中断/04_向量表 Vector Table]]
 
-## 4. Reset_Handler 主线
+## 3. Cortex-M 复位后的第一组关键动作
 
-按当前课程所用 ST startup 概括：
+概念模型：
 
 ```text
 Reset
   ↓
-硬件加载 MSP
+读取向量表第 0 项
   ↓
-硬件取得 Reset_Handler
+MSP ← vector[0]
   ↓
-Reset_Handler
+读取向量表第 1 项
   ↓
-可能显式重装 SP = _estack
+PC ← Reset_Handler 入口值
   ↓
-SystemInit()
-  ↓
-复制 .data：Flash → RAM
-  ↓
-清零 .bss
-  ↓
-__libc_init_array()
-  ↓
-main()
+开始执行 Reset_Handler
 ```
 
-实际工程升级第三方代码后，应重新核对真实 startup 文件。
+这里最关键的是区分：
 
-## 5. `SystemInit()` 的时机很重要
+```text
+地址
+```
 
-当前顺序中它位于 `.data/.bss` 初始化之前。
+和：
 
-因此如果以后自己修改 `SystemInit()`：
+```text
+这个地址中保存的值
+```
 
-> 不要随意依赖普通全局变量已经完成 C runtime 初始化。
+例如：
 
-`SystemInit()` 的具体行为必须看当前 `system_stm32f4xx.c`；不能仅凭函数名假设它把系统配置到 168/180 MHz。
+```text
+0x08000000 是某个地址
+[0x08000000] 是该地址处保存的 32 位数
+```
 
-## 6. `.data` 复制循环在做什么？
+如果 `[0x08000000] = 0x20020000`，那么被加载进 MSP 的是 `0x20020000`。
 
-典型先取得：
+## 4. 为什么函数会有“地址”
+
+函数编译后就是一串机器指令，被链接器放到 `.text` 某一段地址范围。
+
+例如：
+
+```text
+08000278 ... Reset_Handler
+```
+
+可以理解为：
+
+> Reset_Handler 的代码入口位于 Flash 附近的这个地址。
+
+因此向量表中才能保存它的入口值。
+
+深入：
+- [[10_基础知识体系/01_计算机与MCU基础/13_函数地址与代码地址到底是什么]]
+
+## 5. 为什么向量表里的函数入口可能是奇数
+
+Cortex-M 使用 Thumb 指令状态。函数指针/异常入口值的 bit0 带有 Thumb 状态含义。
+
+所以你可能看到：
+
+```text
+符号地址：        0x08000278
+向量表中的入口值：0x08000279
+```
+
+这通常不是错位 1 字节。
+
+深入：
+- [[10_基础知识体系/03_Cortex-M与启动中断/15_Thumb状态与函数地址最低位]]
+
+## 6. Startup 文件通常包含什么
+
+典型 Startup 至少包含：
+
+```text
+向量表
+Reset_Handler
+默认异常/中断 Handler
+weak alias / weak symbol
+```
+
+它不是“神秘启动器”，它同样会被汇编/编译、进入 `.o`、参与链接，最终成为程序本身的一部分。
+
+深入：
+- [[10_基础知识体系/03_Cortex-M与启动中断/06_Startup 文件到底是什么]]
+
+## 7. Reset_Handler 为什么必须初始化 C 运行环境
+
+复位后，RAM 不会自动变成 ELF 中描述的 C 变量状态。
+
+因此 Reset_Handler（或者它调用的 runtime）需要完成至少两类工作。
+
+### 7.1 `.data` copy
+
+```text
+Flash 初始化镜像
+_sidata
+   │
+   │ copy
+   ▼
+_sdata ........ _edata
+RAM
+```
+
+### 7.2 `.bss` clear
+
+```text
+_sbss ........ _ebss
+        ↓
+全部写 0
+```
+
+只有完成这些操作后：
+
+```c
+uint32_t counter = 10;
+uint32_t flag;
+```
+
+才满足 C 语言层面的预期：
+
+```text
+counter == 10
+flag == 0
+```
+
+深入：
+- [[10_基础知识体系/02_构建与链接/15_VMA LMA 与 data 初始化镜像]]
+- [[10_基础知识体系/02_构建与链接/20_NOBITS NOLOAD 与为什么RAM占用不等于Flash占用]]
+- [[10_基础知识体系/03_Cortex-M与启动中断/08_data copy 与 bss clear 为什么由 Startup 做]]
+
+## 8. C Runtime 初始化：一个常见误读
+
+反汇编里常能看到：
 
 ```asm
-ldr r0, =_sdata
-ldr r1, =_edata
-ldr r2, =_sidata
+bl __libc_init_array
 ```
 
-概念：
+一个自然但**不准确**的读法是：
+
+> “Startup 汇编里直接 `bl .init_array`。”
+
+实际不是这样。`.init_array` 是一个 **section**（函数指针数组），不是一段可以 `bl` 过去的代码。
+
+真实链条是：
 
 ```text
-r0 = RAM destination start
-r1 = RAM destination end
-r2 = Flash source
-```
-
-然后循环把 Flash 初始镜像复制到 RAM，直到目标地址达到 `_edata`。
-
-所以通常处理半开区间：
-
-```text
-[_sdata, _edata)
-```
-
-## 7. 当前最小程序为什么 `.data` 不需要真正复制？
-
-之前真实 symbol：
-
-```text
-_sdata = 0x20000000
-_edata = 0x20000000
+bl __libc_init_array        ← 汇编调用一个 C 函数
+        ↓
+__libc_init_array (C 函数)
+        ↓
+遍历 .init_array 中的函数指针
+        ↓
+逐个调用它们
 ```
 
 所以：
 
 ```text
-.data length = 0
+.init_array → 数据（函数指针表）
+__libc_init_array → 代码（遍历并调用这张表的 C 函数）
 ```
 
-这说明当前最小 `main()` 没有需要非零初值的可写静态对象。Startup 复制逻辑仍在，只是这次长度为 0。
+C++ 的全局对象构造函数、标了 `__attribute__((constructor))` 的函数，都靠这条链被调用。
 
-这也是 [[09_动手追踪一次启动]] 要人为加入：
+> [!note] 为什么这个区分重要
+> 读到 `bl __libc_init_array` 时，如果你以为它在 `bl` 一个 section，后面看到 `.init_array` 出现在 `objdump -h` 里就会彻底混乱。
+> 记住：**能 `bl` 的只有代码；`.init_array` 是表。**
 
-```c
-volatile uint32_t counter = 10;
-```
+## 9. `SystemInit()` 在哪里
 
-的原因。
+CMSIS/芯片厂商启动代码常在进入 `main()` 前调用 `SystemInit()`。
 
-## 8. `.bss` 为什么必须清零？
+它的具体职责依芯片和工程而定，常与时钟/核心系统配置有关。
 
-例如：
+这里不要背“SystemInit 就等于时钟初始化”这种过度简化。
 
-```c
-uint32_t flag;
-```
+正确方法是：
 
-C 语言要求静态存储期未显式初始化对象以 0 开始，但 RAM 上电值不能靠猜。
+1. 找到当前工程真正链接到的 `SystemInit` 定义。
+2. 阅读源码。
+3. 必要时通过反汇编/断点确认它确实被调用。
 
-所以 Startup 对：
+深入：
+- [[10_基础知识体系/03_Cortex-M与启动中断/09_SystemInit 到底处在什么位置]]
+
+## 10. weak handler 为什么好用
+
+Startup 常给中断 Handler 提供弱默认实现。
+
+概念上：
 
 ```text
-[_sbss, _ebss)
+Startup:
+GPIO_IRQHandler  → weak/default
+
+你的应用:
+GPIO_IRQHandler  → strong definition
 ```
 
-写 0。
+链接时强定义可以替代弱定义。
 
-之前真实：
+因此你不必去修改厂商 Startup 文件，也可以提供自己的中断处理函数。
+
+深入：
+- [[10_基础知识体系/03_Cortex-M与启动中断/14_Weak Handler 为什么能被覆盖]]
+
+## 11. 读 Reset_Handler 只需要最小汇编能力
+
+当前阶段不需要系统学完 ARM 汇编。
+
+至少能识别：
 
 ```text
-_sbss = 0x20000000
-_ebss = 0x2000001c
+ldr  → 从内存读取/装地址
+str  → 写内存
+mov  → 传值
+cmp  → 比较
+b    → 跳转
+bl   → 调用函数并设置 LR
 ```
 
-代表这组 symbol 标识的区间为 28 B；`size` 的 bss 汇总为什么更大，见 [[05_Linker Script 与内存布局]]。
+特别提醒 `ldr` 的两种读法差别：
 
-## 9. `__libc_init_array()`
+```asm
+ldr r0, [r1]      ← 加载“地址指向的数据”
+ldr r0, =_sdata   ← 加载“地址本身”
+```
 
-它处理 C/C++ runtime 的初始化数组，C++ 全局构造函数是最典型例子。
+读反汇编时要一直问自己：**这是在加载地址，还是在加载地址里的内容？**
 
-当前纯 C 最小实验不要求深入 Newlib 实现，但要记住：
+深入：
+- [[10_基础知识体系/03_Cortex-M与启动中断/18_读Startup所需的最小Thumb汇编]]
+- [[10_基础知识体系/03_Cortex-M与启动中断/19_C与汇编如何互相调用_AAPCS最小理解]]
 
-> “现在 main 还能跑”不足以证明随意删除 runtime 初始化是安全的。
+## 12. 本页与 Linker Script 的接口
 
-## 10. 然后才进入 `main()`
-
-到这里通常已经满足：
+Linker Script：
 
 ```text
-Stack 已建立
-.data 初值正确
-.bss 已清零
-必要 runtime 初始化完成
+决定布局 + 产生边界符号
 ```
 
-随后 branch/call 到 `main()`。
-
-嵌入式 `main()` 通常不返回，因此最小程序写无限循环。
-
-## 11. Weak Handler
-
-Startup 中很多默认 Handler 是 weak，这样后续用户可提供同名强定义覆盖。
-
-所以 `nm` 中：
+Startup：
 
 ```text
-W Reset_Handler
+读取这些符号 + 执行初始化
 ```
 
-的 `W` 表示 weak symbol，不是 warning 或错误。
-
-## 12. ELF ENTRY 与硬件 Reset 不要混淆
-
-`ENTRY(Reset_Handler)` 属于 linker/ELF 层；真实 Cortex-M reset 读取的是向量表前两项。
-
-因此验证启动链时，应检查：
+最典型接口：
 
 ```text
-.isr_vector 的位置和内容
-Reset_Handler symbol
-最终反汇编控制流
+_estack
+_sidata
+_sdata
+_edata
+_sbss
+_ebss
 ```
 
-而不是只看 ELF entry。
+因此真正理解启动链时，05 与 06 必须来回对照。
 
-## 13. 怎样验证真的进入 `main()`？
+## 13. 离开本页前
 
-ELF 中存在 `main` 和 `Reset_Handler` 只能证明它们被链接。
+闭卷回答：
 
-更强验证是烧录后：
+1. CPU 为什么不会直接找 `main()`？
+2. 向量表第 0、1 项分别干什么？
+3. 谁定义向量表、谁决定其地址、谁运行时读取它？
+4. 为什么函数能被向量表“指向”？
+5. 为什么函数入口值可能是奇数？
+6. Reset_Handler 为什么需要 copy `.data` 和 clear `.bss`？
+7. `.init_array` 和 `__libc_init_array` 分别是什么？哪个能被 `bl`？
+8. weak handler 解决了什么工程问题？
 
-```text
-reset
-break main
-continue
-```
-
-观察：
-
-```text
-PC 是否到 main
-SP 是否在 SRAM 合理范围
-全局变量是否为预期初值
-```
-
-## 14. 故障注入思路
-
-教学实验可故意：
-
-- 跳过 `.data` copy → 非零初值静态变量不再有保证。
-- 跳过 `.bss` clear → 未初始化静态对象不再保证为 0。
-- 破坏向量表位置 → CPU 可能在进入 Reset_Handler 前就失败。
-
-故障注入的价值是验证因果链，不是为了“把工程搞坏”。
-
-## 15. 离开本页前
-
-闭卷讲清：
-
-```text
-Reset → vector[0] → MSP → vector[1] → Reset_Handler
-→ SystemInit → .data copy → .bss clear → runtime init → main
-```
-
-并回答：
-
-1. CPU 是先得到 MSP 还是先执行 Reset_Handler？
-2. Linker 与 Startup 在 `.data` 初始化中分别负责什么？
-3. `_sdata == _edata` 表示什么？
-4. 为什么 `.bss` 必须由运行时代码清零？
-5. 为什么 ELF 正确仍不能证明 Startup 真执行成功？
-
-下一步：[[07_最小 Executable 与 ELF 体检]]。
+下一步：[[01_P0_仓库与构建基线/07_最小 Executable 与 ELF 体检]]

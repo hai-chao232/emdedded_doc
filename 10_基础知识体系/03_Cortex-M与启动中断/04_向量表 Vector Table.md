@@ -1,13 +1,18 @@
 ---
-tags: [cortex-m, vector-table, interrupt, reset]
+tags: [cortex-m, vector-table, interrupt, reset, startup]
 aliases: [Vector Table, 向量表]
 ---
 
 # 向量表 Vector Table
 
+> [!abstract] 本页是启动链的核心基础页之一
+> 它要回答同一个对象的五个不同“谁”，以及一个关键区别：**表项里存的是地址值，不是函数名。**
+
 ## 一句话先说清
 
 向量表是一张按 exception number 排列的“入口地址表”。Cortex-M 硬件在复位和异常发生时直接读取它：第 0 项提供初始 MSP，第 1 项提供 Reset Handler，后续项提供各种 exception/IRQ handler 入口。
+
+它不是 CPU “搜索函数名”的目录，而是 CPU 可直接读取的数值表。
 
 ---
 
@@ -39,7 +44,25 @@ index  address offset   content
 
 ---
 
-# 2. 谁使用它？
+# 2. 五个“谁”：把角色分开就不神秘
+
+这是理解向量表最有效的一把刀。同一个向量表，有五个完全不同的角色参与：
+
+```text
+谁定义表项（内容是什么）？      → Startup 源码
+谁把名字解析成最终数值？        → Assembler + Linker
+谁安排它的最终地址并保留它？    → Linker Script
+谁把它写进芯片？                → 烧录器 / Debug Probe
+谁在运行时使用它？              → Cortex-M 核心硬件
+```
+
+把这五个角色分开，向量表就不再神秘。
+
+最常见的混淆是：以为“写了 vector table 的代码”就等于“向量表被用上了”。其实源码只是**描述内容**，地址由 linker 决定，而真正读取它的既不是 linker 也不是 startup 代码，是硬件。
+
+---
+
+# 3. 谁使用它？
 
 最关键答案：
 
@@ -56,7 +79,7 @@ index  address offset   content
 
 ---
 
-# 3. 谁创建它？
+# 4. 谁创建它？
 
 通常由 Startup 汇编文件定义内容，例如概念：
 
@@ -79,7 +102,7 @@ Startup source
 
 ---
 
-# 4. 谁决定它最终放在哪？
+# 5. 谁决定它最终放在哪？
 
 Linker Script。
 
@@ -109,7 +132,7 @@ CPU
 
 ---
 
-# 5. 它在 STM32F446 Flash 中通常长什么样？
+# 6. 它在 STM32F446 Flash 中通常长什么样？
 
 如果主 Flash 固件被链接到：
 
@@ -127,11 +150,38 @@ CPU
 ...
 ```
 
-但 Cortex-M reset 架构上从启动向量位置读取，STM32 还存在 boot memory alias，下一节会细讲。
+但 Cortex-M reset 架构上从启动向量位置读取，STM32 还存在 boot memory alias，详见
+[[10_基础知识体系/03_Cortex-M与启动中断/05_Cortex-M Reset 到底发生了什么]]。
+
+### 实际字节长什么样
+
+用当前工程的真实值举例：
+
+```text
+_estack       = 0x20020000
+Reset_Handler = 0x08000278（symbol view）
+```
+
+Flash 中前几个 32 位 word 可能呈现类似：
+
+```text
+0x08000000: 00 00 02 20
+0x08000004: 79 02 00 08
+...
+```
+
+如果目标是 little-endian，把 4 个字节重新解释为 32 位值后：
+
+```text
+0x20020000
+0x08000279
+```
+
+第二项最低位是 1，涉及 Thumb 状态，见第 11 节。
 
 ---
 
-# 6. 为什么第 0 项不是 handler？
+# 7. 为什么第 0 项不是 handler？
 
 因为复位后 CPU 首先需要一个可用栈。
 
@@ -147,7 +197,7 @@ initial MSP
 
 ---
 
-# 7. 第 1 项有什么效果？
+# 8. 第 1 项有什么效果？
 
 CPU 取得它以后，建立复位入口控制流。
 
@@ -177,7 +227,7 @@ ENTRY(Reset_Handler)
 
 ---
 
-# 8. 中断时怎么用？
+# 9. 中断时怎么用？
 
 假设某个外部 IRQ 的 exception number 对应表项 N。
 
@@ -199,9 +249,15 @@ ENTRY(Reset_Handler)
 表项中的入口值
 ```
 
+P0 只需要知道：
+
+> Reset 和普通异常/中断共享“向量表提供入口”的总体思想，但 Reset 的初始 MSP 读取有其特殊位置。
+
+异常进入时自动压栈、异常返回、优先级等机制，属于后续中断课程。
+
 ---
 
-# 9. IRQn 与向量表下标
+# 10. IRQn 与向量表下标
 
 Cortex-M 系统 exceptions 占前面的 exception numbers。
 
@@ -229,7 +285,7 @@ vector index = IRQn + 16
 
 ---
 
-# 10. Thumb bit 为什么会看到最低位为 1？
+# 11. Thumb bit 为什么会看到最低位为 1？
 
 Cortex-M handler 必须进入 Thumb state。
 
@@ -253,9 +309,25 @@ CPU 使用入口时会按架构规则处理最低位。
 
 > 看 raw vector bytes 时，handler entry 不一定和 `nm` symbol address 数值完全相同。
 
+这不是错位 1 字节，代码也不是从奇数字节边界取指。
+
+深入：
+- [[10_基础知识体系/03_Cortex-M与启动中断/15_Thumb状态与函数地址最低位]]
+
 ---
 
-# 11. `KEEP()` 为什么重要？
+# 12. 为什么表里放“地址/入口值”
+
+Handler 编译后成为机器代码，位于 `.text` 中。
+
+因此表项可以保存一个入口值，使硬件在异常发生时改变控制流。
+
+跳转：
+- [[10_基础知识体系/01_计算机与MCU基础/13_函数地址与代码地址到底是什么]]
+
+---
+
+# 13. `KEEP()` 为什么重要？
 
 CPU 硬件会使用向量表，但普通代码里不一定有函数“引用”整个表。
 
@@ -273,7 +345,25 @@ KEEP(*(.isr_vector))
 
 ---
 
-# 12. 怎样从 ELF 直接看？
+# 14. VTOR 是什么
+
+部分 Cortex-M 支持 Vector Table Offset Register，用来重定位向量表基址。
+
+P0 不必先研究 Bootloader 场景，只需知道：
+
+```text
+向量表不一定永远物理绑定在某一个不可变地址；
+架构/芯片可提供重定位机制。
+```
+
+当前工程究竟使用哪个 base，要以芯片启动映射与 VTOR 配置为准。
+
+详见：
+[[10_基础知识体系/03_Cortex-M与启动中断/13_VTOR 向量表重定位]]
+
+---
+
+# 15. 怎样从 ELF 直接看？
 
 Section：
 
@@ -310,9 +400,18 @@ Reset_Handler
 
 一一对照。
 
+运行时还可以：
+
+```text
+reset and halt
+→ 看 MSP
+→ 看 PC
+→ 对照 vector[0]/vector[1]
+```
+
 ---
 
-# 13. 如果向量表错了会怎样？
+# 16. 如果向量表错了会怎样？
 
 例如：
 
@@ -334,7 +433,7 @@ CPU 可能跳到错误地址，导致 fault/lockup/不可预测行为。
 
 ---
 
-# 14. 向量表不是 NVIC
+# 17. 向量表不是 NVIC
 
 NVIC 管：
 
@@ -355,7 +454,7 @@ handler entry
 
 ---
 
-# 15. 向量表不是“中断函数数组”
+# 18. 向量表不是“中断函数数组”
 
 从 C 视角这样类比有帮助，但不完全准确：
 
@@ -366,7 +465,7 @@ handler entry
 
 ---
 
-# 16. 一张总图
+# 19. 一张总图
 
 ```text
 Startup source
@@ -401,7 +500,19 @@ Reset / Exception control flow
 
 ---
 
-## 17. 下一步
+## 20. 离开本页前
+
+1. 向量表是代码还是数据？
+2. 第 0、1 项分别是什么？为什么第 0 项不是 handler？
+3. 谁定义向量表、谁解析名字、谁决定地址、谁烧录、谁运行时读取它？
+4. 为什么表里的函数入口值可以让 CPU 进入 Handler？
+5. 为什么 vector[1] 与 `nm` 看到的函数 symbol 可能差 1？
+6. `KEEP()` 在这里解决什么问题？
+7. 向量表和 NVIC 分别负责什么？
+
+---
+
+## 21. 下一步
 
 必须继续看：
 
