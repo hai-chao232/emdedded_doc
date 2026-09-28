@@ -11,6 +11,8 @@ tags: [MOC, cortex-m, startup, interrupt]
 建议主线：
 
 ```text
+── 启动链 ────────────────────────────────
+
 [[10_基础知识体系/03_Cortex-M与启动中断/01_Cortex-M4 与 STM32F446 的关系]]
         ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/02_SP MSP PSP 是什么]]
@@ -19,16 +21,28 @@ tags: [MOC, cortex-m, startup, interrupt]
         ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/04_向量表 Vector Table]]
         ↓
+[[10_基础知识体系/03_Cortex-M与启动中断/15_Thumb状态与函数地址最低位]]   ← 紧跟向量表
+        ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/05_Cortex-M Reset 到底发生了什么]]
         ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/06_Startup 文件到底是什么]]
         ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/07_Reset_Handler 逐段看]]
         ↓
+[[10_基础知识体系/03_Cortex-M与启动中断/18_读Startup所需的最小Thumb汇编]]   ← 读它的工具
+        ↓
+[[10_基础知识体系/03_Cortex-M与启动中断/19_C与汇编如何互相调用_AAPCS最小理解]]
+        ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/08_data copy 与 bss clear 为什么由 Startup 做]]
         ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/09_SystemInit 到底处在什么位置]]
         ↓
+[[10_基础知识体系/03_Cortex-M与启动中断/20_Reset_Handler 反汇编逐条对照]]   ← 需先构建
+        ↓
+[[10_基础知识体系/03_Cortex-M与启动中断/16_从上电到 main 的完整动态图]]
+
+── 中断 ──────────────────────────────────
+
 [[10_基础知识体系/03_Cortex-M与启动中断/10_异常 Exception 与中断 Interrupt 的关系]]
         ↓
 [[10_基础知识体系/03_Cortex-M与启动中断/11_异常进入时 CPU 自动做了什么]]
@@ -46,36 +60,29 @@ tags: [MOC, cortex-m, startup, interrupt]
 [[10_基础知识体系/03_Cortex-M与启动中断/17_一次外部中断发生时的完整流程]]
 ```
 
-### 启动链的四个补充节点
+拆成两段的理由：**中断那 6 篇不依赖于是否跑通启动链**。
+如果你现在卡在启动链上，可以先完全跳过中断段。
+
+### 补充节点 15 / 18 / 19 / 20 各自解决什么
+
+已经排进上面的主线了，这里只说明它们**卡在哪个位置**：
 
 ```text
 15 Thumb 状态与函数地址最低位
-   → 解释 vector[1] 为什么比 symbol 大 1
+   → 卡在 "vector[1] 为什么比 nm 报的地址大 1"
+   → 位置：紧跟 04_向量表
 
 18 读 Startup 所需的最小 Thumb 汇编
-   → ldr / str / cmp / b / bl，够读懂 Reset_Handler
+   → 卡在 "Reset_Handler 那些 ldr / str / cmp / b / bl 读不懂"
+   → ldr / str / cmp / b / bl 五个就够，不需要学完整汇编
 
 19 C 与汇编如何互相调用（AAPCS 最小理解）
-   → 为什么汇编可以 bl 一个 C 函数
+   → 卡在 "汇编凭什么能 bl 一个 C 函数"
+   → 位置：紧跟 07_Reset_Handler 逐段看
 
 20 Reset_Handler 反汇编逐条对照
-   → 真实机器码逐条读，需要先构建一次
-```
-
-顺序建议：
-
-```text
-05_Reset 到底发生了什么
-      ↓
-15_Thumb 状态
-
-07_Reset_Handler 逐段看（骨架：为什么有这几步）
-      ↓
-18_最小 Thumb 汇编（工具）
-      ↓
-19_AAPCS（bl 为什么能调 C 函数）
-      ↓
-20_反汇编逐条对照（真实机器码，需要构建产物）
+   → 卡在 "道理都懂了，但没看过真的机器码"
+   → 位置：启动链最后，**必须能构建一次之后再读**
 ```
 
 > [!important] 20 必须配合构建产物读
