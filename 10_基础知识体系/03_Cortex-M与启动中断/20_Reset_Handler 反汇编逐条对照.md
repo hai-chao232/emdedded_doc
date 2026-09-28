@@ -784,12 +784,18 @@ Entry point address:               0x8000279
 >
 > 对照向量表 dump 里那一列全是 `...C9` 的值——都是奇数，同一个原因。
 
-**两个数都对。** 问"入口地址是多少"时，要分清问的是哪个：
+**两个数都对。** 但这里必须把“代码地址”和“带 Thumb 状态的入口表示”分开：
 
 ```text
-符号表里的地址        → 偶数（真实指令地址）
-会被装进 PC 的地址     → 奇数（带 Thumb 状态位）
+Reset_Handler 的代码 symbol value → 0x08000278
+ELF e_entry 的入口表示            → 0x08000279
 ```
+
+> [!important]
+> `e_entry` 是 ELF 文件格式中的字段，**Cortex-M 硬件 Reset 不会读取 ELF Header 来决定启动位置**。
+> 真正的复位入口仍来自向量表 `vector[1]`。
+>
+> 因此这里的重点只是：同一个 Thumb 函数在不同表示场景中，可能看到偶数代码地址和 bit0=1 的入口值；不要把 `e_entry` 当成硬件复位向量。
 
 完整原理见 [[10_基础知识体系/03_Cortex-M与启动中断/15_Thumb状态与函数地址最低位]]。
 
@@ -894,7 +900,7 @@ LOAD 0x00001c 0x2000001c 0x08000334 0x00000 0x00604 RW  0x1000
 
 ```text
 08000278  ldr.w sp, =_estack          ← 从常量池重建 MSP
-0800027c  bl SystemInit               ← 当前工程里它什么都不做
+0800027c  bl SystemInit               ← 当前工程中开启 FPU（CP10/CP11），不配置系统时钟
 08000280  ldr r0, =_sdata   ┐
 08000282  ldr r1, =_edata   │ 装三个地址
 08000284  ldr r2, =_sidata  ┘
